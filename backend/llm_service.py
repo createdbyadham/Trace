@@ -43,6 +43,13 @@ class ReceiptAssistant:
         <capability>Calculating totals for specific periods or categories</capability>
         <capability>Providing insights on spending habits</capability>
     </capabilities>
+    <instructions>
+        <instruction>ALWAYS base your answers on the receipt data provided in the context below. If receipt_data is present, you DO have receipt data — use it.</instruction>
+        <instruction>When the user asks about a product category (e.g. "writing tools", "office supplies", "snacks"), identify ALL matching items from the receipts. For example, "writing tools" includes pens, pencils, markers, highlighters, etc.</instruction>
+        <instruction>When listing items or calculating category totals, show each item name and its price so the user can verify.</instruction>
+        <instruction>When asked whether a specific item was purchased, search through ALL items in every receipt in the context.</instruction>
+        <instruction>Only say you have no receipt data if the receipt_data section below is completely empty.</instruction>
+    </instructions>
     <error_handling>
         <insufficient_data>
             <action>Respond politely indicating missing information</action>

@@ -119,37 +119,126 @@ class RAGService:
 
     # ── Public API ──────────────────────────────────────────────────
 
-    def add_receipt(self, text: str, metadata: dict) -> str:
+    def add_receipt(self, text: str, metadata: dict,
+                    items: list[dict] | None = None) -> str:
         """
         Single entry-point for storing any receipt.
-        - Generates a collision-free ID
-        - Normalises metadata to ChromaDB-safe types
-        - Adds to ChromaDB (embedded by ChromaDB's built-in ONNX model)
-        - Refreshes the BM25 index
-        Returns the generated document ID.
+
+        Creates **multiple** ChromaDB documents per receipt:
+          1. One "full_receipt" chunk  – the complete structured text
+             (good for merchant / total / date queries)
+          2. One "item" chunk per line-item, with merchant + date context
+             (good for item-specific and category queries like
+              "did I buy a shredder?" or "how much on writing tools?")
+
+        All chunks share a `receipt_group` key so retrieval can
+        de-duplicate and always hand the LLM the full receipt.
         """
-        doc_id = self._make_id()
+        receipt_group = self._make_id()
 
         # Normalise metadata ─ ChromaDB only accepts str | int | float | bool
-        clean_meta = {
-            "source":     str(metadata.get("source", "receipt_ocr")),
-            "title":      str(metadata.get("title", "Unknown")),
-            "date":       str(metadata.get("date", "Unknown")),
-            "total":      float(metadata.get("total", 0.0)),
-            "tax":        float(metadata.get("tax", 0.0)),
-            "item_count": int(metadata.get("item_count", 0)),
-            "timestamp":  str(metadata.get("timestamp", datetime.now().isoformat())),
+        base_meta = {
+            "source":        str(metadata.get("source", "receipt_ocr")),
+            "title":         str(metadata.get("title", "Unknown")),
+            "date":          str(metadata.get("date", "Unknown")),
+            "total":         float(metadata.get("total", 0.0)),
+            "tax":           float(metadata.get("tax", 0.0)),
+            "item_count":    int(metadata.get("item_count", 0)),
+            "timestamp":     str(metadata.get("timestamp", datetime.now().isoformat())),
+            "receipt_group": receipt_group,
+            "chunk_type":    "full_receipt",
         }
 
+        # ── Batch lists ──────────────────────────────────────────────
+        docs = [text]
+        metas = [base_meta]
+        ids = [f"{receipt_group}_full"]
+
+        # Per-item chunks
+        if items:
+            merchant = metadata.get("title", "Unknown")
+            date = metadata.get("date", "Unknown")
+
+            for idx, item in enumerate(items):
+                desc  = str(item.get("desc", item.get("name", "Item")))
+                price = float(item.get("price", 0))
+                qty   = item.get("qty", 1)
+
+                item_text = (
+                    f"Purchased at {merchant} on {date}: "
+                    f"{desc} – ${price:.2f} (qty: {qty})"
+                )
+
+                item_meta = {
+                    **base_meta,
+                    "chunk_type": "item",
+                }
+
+                docs.append(item_text)
+                metas.append(item_meta)
+                ids.append(f"{receipt_group}_item_{idx}")
+
         self.collection.add(
-            documents=[text],
-            metadatas=[clean_meta],
-            ids=[doc_id],
+            documents=docs,
+            metadatas=metas,
+            ids=ids,
         )
 
         self._refresh_bm25()
-        logger.info(f"Stored receipt {doc_id} ('{clean_meta['title']}')")
-        return doc_id
+        logger.info(
+            f"Stored receipt {receipt_group} ('{base_meta['title']}') – "
+            f"1 summary + {len(items or [])} item chunks"
+        )
+        return receipt_group
+
+    # ── Fallback ─────────────────────────────────────────────────────
+
+    def _fallback_all_receipts(self, max_receipts: int = 20) -> str:
+        """
+        Return every *full_receipt* document when the normal retrieval
+        pipeline scores everything below threshold.
+
+        For a personal expense tracker with a modest number of receipts
+        this is cheap (a few KB) and guarantees the LLM can reason about
+        categories, item types, etc. that embedding models struggle with.
+        """
+        try:
+            results = self.collection.get(
+                where={"chunk_type": "full_receipt"},
+            )
+
+            # Legacy data that pre-dates chunk_type tagging
+            if not results or not results["documents"]:
+                results = self.collection.get()
+                if not results or not results["documents"]:
+                    return ""
+
+            parts: list[str] = []
+            for i, (doc, meta) in enumerate(
+                zip(results["documents"], results["metadatas"])
+            ):
+                if i >= max_receipts:
+                    break
+                group = meta.get("receipt_group", f"receipt_{i}")
+                parts.append(
+                    f"[Receipt ID: {group}]\n"
+                    f"Merchant: {meta.get('title', 'Unknown')} | "
+                    f"Date: {meta.get('date', 'N/A')} | "
+                    f"Total: ${float(meta.get('total', 0)):.2f} | "
+                    f"Tax: ${float(meta.get('tax', 0)):.2f} | "
+                    f"Items: {meta.get('item_count', 0)}\n"
+                    f"Content:\n{doc}"
+                )
+
+            logger.info(
+                f"Fallback: returning {len(parts)} full receipt(s) to LLM"
+            )
+            return "\n\n---\n\n".join(parts)
+        except Exception as e:
+            logger.error(f"Fallback retrieval failed: {e}")
+            return ""
+
+    # ── Main retrieval ───────────────────────────────────────────────
 
     async def get_relevant_context(self, query: str, top_k: int = 5) -> str:
         """
@@ -158,16 +247,23 @@ class RAGService:
           2. Sparse search (BM25 keyword matching)
           3. Merge & deduplicate candidates
           4. Rerank with Cross-Encoder
-          5. Format top-k for the LLM context window
+          5. De-duplicate by receipt_group and always surface the
+             *full receipt* so the LLM has complete item-level detail
+          6. Format top-k for the LLM context window
+
+        **Fallback**: if the scored pipeline produces no results (e.g. the
+        query is a category like "writing tools" that doesn't match any
+        chunk literally), return *all* full-receipt docs so the LLM can
+        do the semantic reasoning itself.
         """
         doc_count = self.collection.count()
         if doc_count == 0:
             return ""
 
-        fetch_k = min(top_k * 2, doc_count)
+        # Fetch more candidates since each receipt now has many chunks
+        fetch_k = min(top_k * 4, doc_count)
 
         # ── 1. Dense retrieval ──────────────────────────────────────
-        # query_texts lets ChromaDB embed with its own ONNX model
         dense_results = self.collection.query(
             query_texts=[query],
             n_results=fetch_k,
@@ -204,7 +300,7 @@ class RAGService:
                 }
 
         if not candidates:
-            return ""
+            return self._fallback_all_receipts()
 
         # ── 4. Rerank with Cross-Encoder ────────────────────────────
         candidate_ids = list(candidates.keys())
@@ -218,22 +314,52 @@ class RAGService:
             reverse=True,
         )
 
-        # ── 5. Format final context ────────────────────────────────
+        # ── 5. De-dup by receipt_group & resolve full receipt ───────
+        #    When an *item* chunk matches, we still hand the LLM the
+        #    full receipt so it can reason over all line-items.
+        seen_groups: set[str] = set()
         final_context: list[str] = []
-        for doc_id, score in scored[:top_k]:
-            if score < -5:  # very lenient; cross-encoder logits range ~[-11, +11]
+
+        for doc_id, score in scored:
+            if len(final_context) >= top_k:
+                break
+            if score < -5:
                 continue
 
             meta = candidates[doc_id]["meta"]
+            # receipt_group links all chunks of one receipt; fall back
+            # to doc_id for legacy docs that pre-date chunking.
+            receipt_group = meta.get("receipt_group", doc_id)
+
+            if receipt_group in seen_groups:
+                continue
+            seen_groups.add(receipt_group)
+
+            # If the hit was an item chunk, swap in the full receipt text
+            doc_text = candidates[doc_id]["doc"]
+            if meta.get("chunk_type") == "item":
+                full_id = f"{receipt_group}_full"
+                try:
+                    full_doc = self.collection.get(ids=[full_id])
+                    if full_doc and full_doc["documents"]:
+                        doc_text = full_doc["documents"][0]
+                        meta = full_doc["metadatas"][0]
+                except Exception:
+                    pass  # fall through to the item-chunk text
+
             final_context.append(
-                f"[Receipt ID: {doc_id}]\n"
+                f"[Receipt ID: {receipt_group}]\n"
                 f"Merchant: {meta.get('title', 'Unknown')} | "
                 f"Date: {meta.get('date', 'N/A')} | "
                 f"Total: ${float(meta.get('total', 0)):.2f} | "
                 f"Tax: ${float(meta.get('tax', 0)):.2f} | "
                 f"Items: {meta.get('item_count', 0)} | "
                 f"Relevance: {float(score):.2f}\n"
-                f"Content:\n{candidates[doc_id]['doc']}"
+                f"Content:\n{doc_text}"
             )
+
+        # ── 6. Fallback when reranker filtered everything out ───────
+        if not final_context:
+            return self._fallback_all_receipts()
 
         return "\n\n---\n\n".join(final_context)

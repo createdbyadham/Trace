@@ -3,7 +3,7 @@
 import { AnimatePresence, motion } from "framer-motion";
 import { PlaceholdersAndVanishInput } from "../components/ui/placeholders-and-vanish-input";
 import { useState, useEffect, useRef, useCallback } from "react";
-import { streamChat } from "../api/chat";
+import { streamChat, clearChat } from "../api/chat";
 import { cn } from "@/lib/utils";
 import { MeshGradient } from "../components/MeshGradient";
 import { ReceiptScanOverlay } from "../components/ReceiptScanOverlay";
@@ -60,6 +60,16 @@ export function ChatPage() {
 
   const handleChange = () => {
     // Handle input change if needed
+  };
+
+  const handleClearChat = async () => {
+    try {
+      await clearChat();
+      setMessages([]);
+      setIsExpanded(false);
+    } catch (error) {
+      console.error('Failed to clear chat:', error);
+    }
   };
 
   // Called after the fast OCR scan completes — shows overlay AND fires LLM parse in parallel
@@ -158,6 +168,37 @@ export function ChatPage() {
             </div>
             <span className="text-white font-medium text-lg">Trace</span>
           </div>
+
+          {/* Clear Chat Button - only visible when chat is expanded */}
+          <AnimatePresence>
+            {isExpanded && (
+              <motion.button
+                onClick={handleClearChat}
+                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[#2d333d]/80 hover:bg-[#3d444d] text-gray-300 hover:text-white transition-colors duration-200"
+                initial={{ opacity: 0, x: 20 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 20 }}
+                transition={{ duration: 0.2 }}
+                title="Clear chat history"
+              >
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="w-4 h-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                  />
+                </svg>
+                <span className="text-sm font-medium">Clear</span>
+              </motion.button>
+            )}
+          </AnimatePresence>
         </header>
 
         {/* Main Content */}

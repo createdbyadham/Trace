@@ -112,8 +112,13 @@ async def ocr_parse_endpoint(request: ParseReceiptRequest):
             f"Items:\n{items_text}"
         )
 
-        # Store in ChromaDB with metadata
+        # Store in ChromaDB with metadata + per-item chunks
         if request.raw_text and request.raw_text.strip():
+            items_for_rag = [
+                {"desc": item.desc, "price": item.price, "qty": item.qty}
+                for item in parsed_data.items
+            ] if parsed_data.items else None
+
             rag_service.add_receipt(
                 text=structured_doc,
                 metadata={
@@ -124,7 +129,8 @@ async def ocr_parse_endpoint(request: ParseReceiptRequest):
                     "tax": tax,
                     "item_count": len(parsed_data.items),
                     "timestamp": datetime.now().isoformat()
-                }
+                },
+                items=items_for_rag,
             )
         else:
             logging.warning("Skipping RAG storage for receipt with empty text")
@@ -192,6 +198,7 @@ async def store_receipt(receipt: StoreReceiptRequest):
                 "item_count": len(receipt.items),
                 "timestamp": datetime.now().isoformat(),
             },
+            items=receipt.items,
         )
 
         logging.info(f"Successfully stored receipt for {receipt.title}")
