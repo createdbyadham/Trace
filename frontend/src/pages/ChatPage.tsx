@@ -202,48 +202,43 @@ export function ChatPage() {
         </header>
 
         {/* Main Content */}
-        <div className={cn(
-          "flex flex-col flex-1 min-h-0 px-4",
-          !isExpanded && "justify-center items-center"
-        )}>
-          {/* Welcome Section - Only shown when not expanded */}
-          {!isExpanded && (
-            <motion.div
-              className="flex flex-col items-center text-center mb-8"
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ duration: 0.5 }}
-            >
-              {/* Logo Icon */}
-              <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mb-8 shadow-lg">
-                <TraceIcon className="w-12 h-12 text-[#1a2332]" />
-              </div>
-
-              {/* Greeting */}
-              <h2 className="text-[#a1aace] text-2xl font-medium mb-2">
-                Good Morning, Adham!
-              </h2>
-              <h1 className="text-white text-3xl sm:text-3xl font-semibold mb-4">
-                How may I assist you today?
-              </h1>
-
-              {/* Subtitle */}
-              <p className="text-[#a1aace] text-xs max-w-md leading-relaxed">
-                Ready to assist you with anything you need regarding your spendings.
-                <br />
-                From answering questions, to providing recommendations.
-              </p>
-            </motion.div>
-          )}
-
-          {/* Chat Messages - Only shown when expanded */}
-          <AnimatePresence>
-            {isExpanded && (
+        <div className="flex flex-col flex-1 min-h-0 px-4">
+          <AnimatePresence mode="wait">
+            {!isExpanded ? (
               <motion.div
+                key="welcome"
+                className="flex-1 flex flex-col items-center justify-center text-center"
+                initial={{ opacity: 0, scale: 0.97 }}
+                animate={{ opacity: 1, scale: 1, transition: { duration: 0.35, ease: "easeOut" } }}
+                exit={{ opacity: 0, scale: 0.97, transition: { duration: 0.2, ease: "easeIn" } }}
+              >
+                {/* Logo Icon */}
+                <div className="w-16 h-16 bg-white rounded-2xl flex items-center justify-center mb-8 shadow-lg">
+                  <TraceIcon className="w-12 h-12 text-[#1a2332]" />
+                </div>
+
+                {/* Greeting */}
+                <h2 className="text-[#a1aace] text-2xl font-medium mb-2">
+                  Good Morning, Adham!
+                </h2>
+                <h1 className="text-white text-3xl sm:text-3xl font-semibold mb-4">
+                  How may I assist you today?
+                </h1>
+
+                {/* Subtitle */}
+                <p className="text-[#a1aace] text-xs max-w-md leading-relaxed">
+                  Ready to assist you with anything you need regarding your spendings.
+                  <br />
+                  From answering questions, to providing recommendations.
+                </p>
+              </motion.div>
+            ) : (
+              <motion.div
+                key="chat"
                 className="flex-1 overflow-y-auto min-h-0 mb-4 w-full scroll-smooth"
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 20 }}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1, transition: { duration: 0.2, ease: "easeOut" } }}
+                exit={{ opacity: 0, transition: { duration: 0.2, ease: "easeIn" } }}
               >
                 <div className="max-w-[46.5%] mx-auto space-y-4">
                   {messages.filter(m => m.content.length > 0).map((message, index) => (
@@ -327,11 +322,7 @@ export function ChatPage() {
           </AnimatePresence>
 
           {/* Input Section */}
-          <div className={cn(
-            "w-full max-w-2xl mx-auto flex-shrink-0 flex flex-col items-center gap-4",
-            !isExpanded && "w-full"
-          )}>
-
+          <div className="w-full max-w-2xl mx-auto flex-shrink-0 flex flex-col items-center gap-4">
             {/* Input Field */}
             <PlaceholdersAndVanishInput
               placeholders={placeholders}
