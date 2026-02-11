@@ -1,10 +1,10 @@
 import os
-from openai import OpenAI
+# CHANGE 1: Import AsyncOpenAI instead of OpenAI
+from openai import AsyncOpenAI 
 from dotenv import load_dotenv
 from rag_service import RAGService
 from memory_service import memory
 
-# Load environment variables from .env file
 load_dotenv()
 
 class ReceiptAssistant:
@@ -12,52 +12,46 @@ class ReceiptAssistant:
         # Initialize RAG service
         self.rag_service = rag_service
         
-        # Initialize OpenAI client with GitHub configuration
-        self.client = OpenAI(
-            base_url="https://models.github.ai/inference",
-            api_key=os.environ.get("GITHUB_TOKEN")
+        # CHANGE 2: Use AsyncOpenAI client
+        self.client = AsyncOpenAI(
+            base_url="http://localhost:11434/v1",
+            api_key="ollama"
         )
         
     async def ask_stream(self, query):
-        """
-        Process a user query using RAG and stream the response token by token.
-        Yields content chunks as they arrive from the LLM.
-        After streaming completes, the full response is saved to memory.
-        """
+        
         # Get relevant context from RAG service
         context = await self.rag_service.get_relevant_context(query)
-        
-        # Get chat history
+
+        # Get chat history from memory
         chat_history = memory.get_chat_history()
         
-        # Construct the prompt with context and chat history
-        system_prompt = f""" <system_prompt>
+        system_prompt = f"""<system_prompt>
     <identity>
         <name>Trace</name>
         <creator>Adham Ehab</creator>
     </identity>
     <role>receipt_analysis_assistant</role>
-    <capabilities>
-        <capability>Summarizing spending patterns</capability>
-        <capability>Finding specific receipts or purchases</capability>
-        <capability>Calculating totals for specific periods or categories</capability>
-        <capability>Providing insights on spending habits</capability>
-    </capabilities>
+    
+    <style>
+        <tone>Concise</tone>
+        <tone>Direct</tone>
+        <tone>No filler words</tone>
+        <format>Bullet points or short sentences</format>
+    </style>
+
     <instructions>
-        <instruction>ALWAYS base your answers on the receipt data provided in the context below. If receipt_data is present, you DO have receipt data — use it.</instruction>
-        <instruction>When the user asks about a product category (e.g. "writing tools", "office supplies", "snacks"), identify ALL matching items from the receipts. For example, "writing tools" includes pens, pencils, markers, highlighters, etc.</instruction>
-        <instruction>When listing items or calculating category totals, show each item name and its price so the user can verify.</instruction>
-        <instruction>When asked whether a specific item was purchased, search through ALL items in every receipt in the context.</instruction>
-        <instruction>Only say you have no receipt data if the receipt_data section below is completely empty.</instruction>
+        <instruction>Answer the question immediately with data. Do not use opening phrases like "The discrepancy is due to..."</instruction>
+        <instruction>Do NOT explain general concepts (e.g., do not explain what sales tax is or how retail works).</instruction>
+        <instruction>For math questions, show the calculation only: "Item ($X) + Tax ($Y) = Total ($Z)".</instruction>
+        <instruction>Keep responses under 50 words unless asked for a long list.</instruction>
+        <instruction>You are a strict data analyst. Do not hallucinate items. Only use provided receipt_data.</instruction>
     </instructions>
-    <error_handling>
-        <insufficient_data>
-            <action>Respond politely indicating missing information</action>
-        </insufficient_data>
-    </error_handling>
+
     <context>
         <receipt_data>{context}</receipt_data>
     </context>
+    
     <conversation_history>
         <chat>{chat_history if chat_history else 'No previous conversation'}</chat>
     </conversation_history>
@@ -66,30 +60,34 @@ class ReceiptAssistant:
         # Add user message to memory
         memory.add_user_message(query)
 
-        # Stream response from OpenAI with GitHub configuration
-        stream = self.client.chat.completions.create(
+        # CHANGE 3: Await the creation of the stream
+        stream = await self.client.chat.completions.create(
             messages=[
-                {
-                    "role": "system",
-                    "content": system_prompt,
-                },
-                {
-                    "role": "user",
-                    "content": query,
-                }
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": query}
             ],
-            model="openai/gpt-4.1",
-            temperature=0.7,
+            model="phi3.5",
+            temperature=0.1,
             top_p=1.0,
-            stream=True,
+            stream=True, # This stays True
+            extra_body={
+                "options": {
+                    "num_ctx": 8192,
+                    "num_gpu": 99,
+                    "num_thread": 6
+                },
+                "keep_alive": -1
+            }
         )
 
         full_response = ""
-        for chunk in stream:
+        
+        # CHANGE 4: Use 'async for' to iterate over the stream
+        async for chunk in stream:
             if chunk.choices and chunk.choices[0].delta.content:
                 token = chunk.choices[0].delta.content
                 full_response += token
                 yield token
 
-        # Save the complete response to memory after streaming finishes
+        # Save to memory
         memory.add_ai_message(full_response)

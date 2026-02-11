@@ -1,20 +1,20 @@
 import os
+import json
+import time
 import tempfile
 from paddleocr import PaddleOCR
-import instructor
-from openai import OpenAI
 from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional
 from dataclasses import dataclass, field as dc_field
 from PIL import Image
 import logging
 import re
-import json
+import httpx
 
 # Define the Pydantic models for the receipt with validation
 class ReceiptItem(BaseModel):
     desc: str = Field(..., description="Description of the item")
-    qty: float = Field(..., description="Quantity of the item", ge=0)
+    qty: Optional[float] = Field(1.0, description="Quantity of the item", ge=0)
     price: float = Field(..., description="Unit price of the item", ge=0)
 
     @field_validator('desc')
@@ -36,12 +36,22 @@ class ReceiptData(BaseModel):
     @field_validator('date')
     @classmethod
     def validate_date_format(cls, v: Optional[str]) -> Optional[str]:
-        """Ensure date is in YYYY-MM-DD format if provided."""
+        """Normalize date to YYYY-MM-DD format if possible, accept None."""
         if v is None:
             return v
-        if not re.match(r'^\d{4}-\d{2}-\d{2}$', v):
-            raise ValueError("Date must be in YYYY-MM-DD format")
-        return v
+        v = v.strip()
+        if not v:
+            return None
+        # Already correct format
+        if re.match(r'^\d{4}-\d{2}-\d{2}$', v):
+            return v
+        # Try common formats the LLM might output instead of retrying
+        from dateutil import parser as dateutil_parser
+        try:
+            parsed = dateutil_parser.parse(v)
+            return parsed.strftime("%Y-%m-%d")
+        except (ValueError, TypeError):
+            return None  # Drop it instead of raising → avoids costly retry
 
     @field_validator('merchant')
     @classmethod
@@ -89,26 +99,41 @@ class OCRResult:
 
 
 class OCRService:
+    OLLAMA_BASE = "http://localhost:11434"
+    MODEL_NAME = "phi3.5"
+
     def __init__(self):
         # Initialize PaddleOCR following 3.x documentation
-        # https://paddlepaddle.github.io/PaddleOCR/main/en/version3.x/pipeline_usage/OCR.html
         self.ocr = PaddleOCR(
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             use_textline_orientation=False,
             lang='en'
         )
-        
-        # Initialize OpenAI client with instructor
-        api_key = os.getenv("OPENAI_API_KEY")
-        base_url = None
-        
-        # Check if using GitHub Models
-        if api_key and api_key.startswith("github_pat_"):
-            base_url = "https://models.github.ai/inference"
-            
-        self.client = instructor.from_openai(OpenAI(api_key=api_key, base_url=base_url))
 
+        # Persistent HTTP client for Ollama (connection reuse)
+        self.http = httpx.Client(base_url=self.OLLAMA_BASE, timeout=30.0)
+
+        # TRIGGER HOT LOAD
+        self._warmup_model()
+
+    def _warmup_model(self):
+        """Forces Ollama to load the model into VRAM immediately."""
+        try:
+            print(f"[OCR] Warming up Ollama model: {self.MODEL_NAME}...")
+            self.http.post(
+                "/api/generate",
+                json={
+                    "model": self.MODEL_NAME,
+                    "prompt": "",
+                    "keep_alive": -1,
+                },
+                timeout=10.0,
+            )
+            print(f"[OCR] Ollama model {self.MODEL_NAME} is hot and ready.")
+        except Exception as e:
+            print(f"[OCR] WARNING: Could not warm up Ollama: {e}")
+    
     def _detect_image_suffix(self, image_bytes: bytes) -> str:
         """Detect image format from magic bytes and return appropriate file suffix."""
         if image_bytes[:8] == b'\x89PNG\r\n\x1a\n':
@@ -216,36 +241,83 @@ class OCRService:
                 logging.error(f"Failed to cleanup temp file: {e}")
 
     def parse_receipt(self, raw_text: str) -> ReceiptData:
-        """Parse raw OCR text into structured receipt data using LLM."""
+        """Parse raw OCR text into structured receipt data using Ollama directly."""
+
+        # 1. Basic check
         if not raw_text or len(raw_text.strip()) < 10:
-            logging.warning(f"Raw text too short or empty ({len(raw_text) if raw_text else 0} chars), skipping LLM parsing")
+            print("[OCR] Raw text too short, skipping LLM parsing")
             return ReceiptData()
 
-        system_prompt = (
-            "You are a receipt parser. Extract structured data from the OCR text of a receipt.\n"
-            "Rules:\n"
-            "- merchant: The store/business name (first line is usually the store name).\n"
-            "- date: Convert to YYYY-MM-DD format.\n"
-            "- total: The final TOTAL amount paid (after tax), not the subtotal.\n"
-            "- tax: The tax amount. Use 0 if not listed.\n"
-            "- items: Each purchased item with description, quantity (default 1), and unit price.\n"
-            "- Do NOT include subtotal, total, or tax as items.\n"
-            "- Fix obvious OCR errors in item names (e.g., '0' that should be 'O', 'l' that should 'I').\n"
-            "- If a field cannot be determined, use null."
-        )
-
         try:
-            receipt_data = self.client.chat.completions.create(
-                model="gpt-4o-mini",
-                response_model=ReceiptData,
-                temperature=0,
-                max_retries=2,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": raw_text}
-                ]
+            t0 = time.perf_counter()
+
+            # --- SCHEMA INJECTION START ---
+            # Generate the schema dynamically from your Pydantic model
+            schema = ReceiptData.model_json_schema()
+            
+            # Optimization: Remove 'title' and 'description' keys to save tokens/latency
+            # This makes the prompt smaller while keeping the structural strictness.
+            def clean_schema(node):
+                if isinstance(node, dict):
+                    node.pop('title', None)
+                    node.pop('description', None)
+                    for key, value in node.items():
+                        clean_schema(value)
+                elif isinstance(node, list):
+                    for item in node:
+                        clean_schema(item)
+            
+            clean_schema(schema)
+            schema_json = json.dumps(schema, separators=(',', ':')) # Minify JSON string
+            # --- SCHEMA INJECTION END ---
+
+            # 2. Direct Ollama /api/chat call — with Schema Injection
+            resp = self.http.post(
+                "/api/chat",
+                json={
+                    "model": self.MODEL_NAME,
+                    "stream": False,
+                    "format": "json",          # Ollama-native JSON mode
+                    "keep_alive": -1,
+                    "options": {
+                        "temperature": 0.0,
+                        "num_ctx": 2048,       # Receipt text is short
+                        "num_gpu": 99,
+                        "num_thread": 6,
+                    },
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a receipt parser. Extract structured data that matches this JSON schema exactly:\n"
+                                f"{schema_json}\n"
+                                "Respond using ONLY valid JSON. Do not include markdown formatting."
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": f"Extract structured data from this receipt text:\n\n{raw_text}",
+                        },
+                    ],
+                },
             )
+            resp.raise_for_status()
+
+            t1 = time.perf_counter()
+            print(f"[OCR] Ollama responded in {t1 - t0:.2f}s")
+
+            # 3. Parse the raw JSON from Ollama's response
+            body = resp.json()
+            llm_text = body.get("message", {}).get("content", "{}")
+            raw_json = json.loads(llm_text)
+
+            # 4. Validate with Pydantic (lenient validators handle quirks)
+            receipt_data = ReceiptData.model_validate(raw_json)
+
+            t2 = time.perf_counter()
+            print(f"[OCR] Total parse_receipt: {t2 - t0:.2f}s")
             return receipt_data
+
         except Exception as e:
-            logging.error(f"Error parsing receipt with LLM: {e}")
+            print(f"[OCR] Error parsing receipt: {e}")
             return ReceiptData()

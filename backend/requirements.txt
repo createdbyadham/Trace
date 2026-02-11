@@ -10,7 +10,7 @@ chromadb==1.0.15
 pymongo==4.13.2
 
 # ML/AI dependencies
-openai==1.95.0
+llama-cpp-python
 langchain==0.3.26
 langchain-community==0.3.26
 langchain-core==0.3.68
@@ -25,4 +25,7 @@ optimum
 # PaddleOCR 3.x (basic OCR, no need for [all])
 paddlepaddle==3.2.0
 paddleocr
-instructor>=1.0.0
+
+instructor
+openai
+python-dateutil

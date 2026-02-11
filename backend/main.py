@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Request, UploadFile, File
+from fastapi import FastAPI, HTTPException, Request, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -10,9 +10,16 @@ from memory_service import memory
 from ocr_service import OCRService
 from datetime import datetime
 import logging
+import time
 from pymongo import MongoClient
 import os
 
+
+# ── Logging config ──────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
 # env + intilize services
 load_dotenv()
@@ -89,7 +96,7 @@ async def ocr_scan_endpoint(file: UploadFile = File(...)):
 
 # Step 2: LLM parse + ChromaDB storage — called in parallel with the animation
 @app.post("/ocr/parse")
-async def ocr_parse_endpoint(request: ParseReceiptRequest):
+async def ocr_parse_endpoint(request: ParseReceiptRequest, background_tasks: BackgroundTasks):
     try:
         parsed_data = ocr_service.parse_receipt(request.raw_text)
 
@@ -112,26 +119,33 @@ async def ocr_parse_endpoint(request: ParseReceiptRequest):
             f"Items:\n{items_text}"
         )
 
-        # Store in ChromaDB with metadata + per-item chunks
+        # Store in ChromaDB in the background to avoid blocking the response
         if request.raw_text and request.raw_text.strip():
             items_for_rag = [
                 {"desc": item.desc, "price": item.price, "qty": item.qty}
                 for item in parsed_data.items
             ] if parsed_data.items else None
 
-            rag_service.add_receipt(
-                text=structured_doc,
-                metadata={
-                    "source": "receipt_ocr",
-                    "title": merchant_name,
-                    "date": date,
-                    "total": total,
-                    "tax": tax,
-                    "item_count": len(parsed_data.items),
-                    "timestamp": datetime.now().isoformat()
-                },
-                items=items_for_rag,
-            )
+            def _store_in_rag():
+                t0 = time.perf_counter()
+                try:
+                    rag_service.add_receipt(
+                        text=structured_doc,
+                        metadata={
+                            "source": "receipt_ocr",
+                            "title": merchant_name,
+                            "date": date,
+                            "total": total,
+                            "tax": tax,
+                            "item_count": len(parsed_data.items),
+                            "timestamp": datetime.now().isoformat()
+                        },
+                        items=items_for_rag,
+                    )
+                except Exception as e:
+                    logging.error(f"Background RAG storage failed: {e}")
+
+            background_tasks.add_task(_store_in_rag)
         else:
             logging.warning("Skipping RAG storage for receipt with empty text")
 
