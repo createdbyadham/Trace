@@ -145,7 +145,6 @@ flowchart TD
 | OCR               | PaddleOCR                 | Lightweight, SOTA text detection.                 |
 | LLM Orchestration | Instructor                | Structured output validation (Pydantic).          |
 | Reranking         | Cross-Encoders (ONNX)     | Accelerated CPU inference for Cross-Encoders.     |
-| Database          | MongoDB                   | Metadata and persistent document storage.         |
 | **Frontend**      | ------------------------- | ------------------------------------------------- |
 | Core              | React + Vite              | Fast component rendering.                         |
 | Language          | TypeScript                | Strict type safety.                               |
@@ -157,8 +156,7 @@ flowchart TD
 
 ### Prerequisites
 Docker & Docker Compose
-A MongoDB connection string (Local or Atlas)
-OpenAI API Key OR GitHub Models Token
+Ollama running Phi 3.5 (`ollama run phi3.5`)
 
 ### Installation
 
@@ -174,8 +172,9 @@ cd Trace
 Create a `.env` file in the `backend/` directory:
 
 ```
-# Database Configuration
-MONGODB_URI=mongodb://host.docker.internal:27017/receipts_db
+# LLM Configuration
+OLLAMA_BASE_URL=http://localhost:11434
+LLM_MODEL=phi3.5
 ```
 
 ```bash

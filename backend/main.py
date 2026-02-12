@@ -28,13 +28,6 @@ rag_service = RAGService()
 ai = ReceiptAssistant(rag_service=rag_service)
 ocr_service = OCRService()
 
-MONGODB_URI = os.getenv("MONGODB_URI")
-if not MONGODB_URI:
-    raise RuntimeError("MONGODB_URI environment variable is not set")
-client = MongoClient(MONGODB_URI)
-db = client["receipts_db"]
-receipts_collection = db["receipts"]
-
 # Validate services on startup
 @app.on_event("startup")
 async def validate_services():
